@@ -1691,6 +1691,9 @@ func TestPushDownGroupAggregateRule(t *testing.T) {
 	// Turn on all flags
 	flagger := mock.NewFlagger(map[feature.Flag]interface{}{
 		feature.PushDownGroupAggregateCount(): true,
+		feature.PushDownGroupAggregateSum():   true,
+		feature.PushDownGroupAggregateFirst(): true,
+		feature.PushDownGroupAggregateLast():  true,
 	})
 
 	ctx, _ := feature.Annotate(context.Background(), flagger)
@@ -1728,42 +1731,107 @@ func TestPushDownGroupAggregateRule(t *testing.T) {
 		}
 	}
 
-	// construct a simple result
-	simpleResult := func(proc string) *plantest.PlanSpec {
-		return &plantest.PlanSpec{
-			Nodes: []plan.Node{
-				plan.CreatePhysicalNode("ReadGroup", readGroupAgg(proc)),
-			},
-		}
-	}
-
 	minProcedureSpec := func() *universe.MinProcedureSpec {
 		return &universe.MinProcedureSpec{
-			SelectorConfig: execute.SelectorConfig{Column: "_value"},
+			SelectorConfig: execute.DefaultSelectorConfig,
+		}
+	}
+	maxProcedureSpec := func() *universe.MaxProcedureSpec {
+		return &universe.MaxProcedureSpec{
+			SelectorConfig: execute.DefaultSelectorConfig,
 		}
 	}
 	countProcedureSpec := func() *universe.CountProcedureSpec {
 		return &universe.CountProcedureSpec{
-			AggregateConfig: execute.AggregateConfig{Columns: []string{"_value"}},
+			AggregateConfig: execute.DefaultAggregateConfig,
 		}
 	}
 	sumProcedureSpec := func() *universe.SumProcedureSpec {
 		return &universe.SumProcedureSpec{
-			AggregateConfig: execute.AggregateConfig{Columns: []string{"_value"}},
+			AggregateConfig: execute.DefaultAggregateConfig,
+		}
+	}
+	firstProcedureSpec := func() *universe.FirstProcedureSpec {
+		return &universe.FirstProcedureSpec{
+			SelectorConfig: execute.DefaultSelectorConfig,
+		}
+	}
+	lastProcedureSpec := func() *universe.LastProcedureSpec {
+		return &universe.LastProcedureSpec{
+			SelectorConfig: execute.DefaultSelectorConfig,
 		}
 	}
 
-	// ReadGroup -> count => ReadGroup
+	// ReadGroup() -> count => ReadGroup(count) -> sum
 	tests = append(tests, plantest.RuleTestCase{
 		Context: ctx,
 		Name:    "SimplePassCount",
 		Rules:   []plan.Rule{influxdb.PushDownGroupAggregateRule{}},
 		Before:  simplePlanWithAgg("count", countProcedureSpec()),
-		After:   simpleResult("count"),
+		After: &plantest.PlanSpec{
+			Nodes: []plan.Node{
+				plan.CreateLogicalNode("ReadGroupAggregate", readGroupAgg("count")),
+				plan.CreateLogicalNode("sum", sumProcedureSpec()),
+			},
+			Edges: [][2]int{
+				{0, 1},
+			},
+		},
+	})
+
+	// ReadGroup() -> sum => ReadGroup(sum) -> sum
+	tests = append(tests, plantest.RuleTestCase{
+		Context: ctx,
+		Name:    "SimplePassSum",
+		Rules:   []plan.Rule{influxdb.PushDownGroupAggregateRule{}},
+		Before:  simplePlanWithAgg("sum", sumProcedureSpec()),
+		After: &plantest.PlanSpec{
+			Nodes: []plan.Node{
+				plan.CreateLogicalNode("ReadGroupAggregate", readGroupAgg("sum")),
+				plan.CreateLogicalNode("sum", sumProcedureSpec()),
+			},
+			Edges: [][2]int{
+				{0, 1},
+			},
+		},
+	})
+
+	// ReadGroup() -> first => ReadGroup(first) -> min
+	tests = append(tests, plantest.RuleTestCase{
+		Context: ctx,
+		Name:    "SimplePassFirst",
+		Rules:   []plan.Rule{influxdb.PushDownGroupAggregateRule{}},
+		Before:  simplePlanWithAgg("first", firstProcedureSpec()),
+		After: &plantest.PlanSpec{
+			Nodes: []plan.Node{
+				plan.CreateLogicalNode("ReadGroupAggregate", readGroupAgg("first")),
+				plan.CreateLogicalNode("min", minProcedureSpec()),
+			},
+			Edges: [][2]int{
+				{0, 1},
+			},
+		},
+	})
+
+	// ReadGroup() -> sum => ReadGroup(sum) -> sum
+	tests = append(tests, plantest.RuleTestCase{
+		Context: ctx,
+		Name:    "SimplePassLast",
+		Rules:   []plan.Rule{influxdb.PushDownGroupAggregateRule{}},
+		Before:  simplePlanWithAgg("last", lastProcedureSpec()),
+		After: &plantest.PlanSpec{
+			Nodes: []plan.Node{
+				plan.CreateLogicalNode("ReadGroupAggregate", readGroupAgg("last")),
+				plan.CreateLogicalNode("max", maxProcedureSpec()),
+			},
+			Edges: [][2]int{
+				{0, 1},
+			},
+		},
 	})
 
 	// Rewrite with successors
-	// ReadGroup -> count -> sum {2} => ReadGroup -> count {2}
+	// ReadGroup() -> count -> sum {2} => ReadGroup(count) -> sum -> sum {2}
 	tests = append(tests, plantest.RuleTestCase{
 		Context: ctx,
 		Name:    "WithSuccessor1",
@@ -1783,20 +1851,22 @@ func TestPushDownGroupAggregateRule(t *testing.T) {
 		},
 		After: &plantest.PlanSpec{
 			Nodes: []plan.Node{
-				plan.CreatePhysicalNode("ReadGroup", readGroupAgg("count")),
+				plan.CreatePhysicalNode("ReadGroupAggregate", readGroupAgg("count")),
+				plan.CreateLogicalNode("sum", sumProcedureSpec()),
 				plan.CreateLogicalNode("sum", sumProcedureSpec()),
 				plan.CreateLogicalNode("sum", sumProcedureSpec()),
 			},
 			Edges: [][2]int{
 				{0, 1},
-				{0, 2},
+				{1, 2},
+				{1, 3},
 			},
 		},
 	})
 
 	// Cannot replace a ReadGroup that already has an aggregate. This exercises
 	// the check that ReadGroup aggregate is not set.
-	// ReadGroup -> count -> count => ReadGroup -> count
+	// ReadGroup() -> count -> count => ReadGroup(count) -> sum -> count
 	tests = append(tests, plantest.RuleTestCase{
 		Context: ctx,
 		Name:    "WithSuccessor2",
@@ -1814,11 +1884,13 @@ func TestPushDownGroupAggregateRule(t *testing.T) {
 		},
 		After: &plantest.PlanSpec{
 			Nodes: []plan.Node{
-				plan.CreatePhysicalNode("ReadGroup", readGroupAgg("count")),
+				plan.CreatePhysicalNode("ReadGroupAggregate", readGroupAgg("count")),
+				plan.CreateLogicalNode("sum", sumProcedureSpec()),
 				plan.CreateLogicalNode("count", countProcedureSpec()),
 			},
 			Edges: [][2]int{
 				{0, 1},
+				{1, 2},
 			},
 		},
 	})
