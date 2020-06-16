@@ -177,12 +177,6 @@ export const createCheckFromTimeMachine = () => async (
     console.error(error)
     const message = getErrorMessage(error)
     dispatch(notify(copy.createCheckFailed(message)))
-    // if (!message.includes(rename)) {
-    //   reportError(error, {
-    //     context: {state: getState()},
-    //     name: 'saveCheckFromTimeMachine function',
-    //   })
-    // }
   }
 }
 
@@ -222,10 +216,6 @@ export const updateCheckFromTimeMachine = () => async (
   } catch (error) {
     console.error(error)
     dispatch(notify(copy.updateCheckFailed(error.message)))
-    // reportError(error, {
-    //   context: {state: getState()},
-    //   name: 'saveCheckFromTimeMachine function',
-    // })
   }
 }
 
